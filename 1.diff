@@ -1,0 +1,235 @@
+diff --git a/lib/ast.js b/lib/ast.js
+index f7de7040..9c5e08ed 100644
+--- a/lib/ast.js
++++ b/lib/ast.js
+@@ -216,6 +216,22 @@ var AST_Directive = DEFNODE("Directive", "value quote", function AST_Directive(p
+     },
+ }, AST_Statement);
+ 
++var AST_LianmengDirective = DEFNODE("LianmengDirective", "value quote", function AST_LianmengDirective(props) {
++    if (props) {
++        this.value = props.value;
++        this.start = props.start;
++        this.end = props.end;
++        this.body = props.value;
++    }
++
++    this.flags = 0;
++}, {
++    $documentation: "Represents a lianmeng directive",
++    $propdoc: {
++        value: "[string] The value of this directive",
++    },
++}, AST_Statement);
++
+ var AST_SimpleStatement = DEFNODE("SimpleStatement", "body", function AST_SimpleStatement(props) {
+     if (props) {
+         this.body = props.body;
+@@ -2690,6 +2706,21 @@ var AST_String = DEFNODE("String", "value quote", function AST_String(props) {
+     }
+ }, AST_Constant);
+ 
++var AST_LianmengLiteral = DEFNODE("LianmengLiteral", null, function AST_LianmengLiteral(props) {
++    if (props) {
++        this.value = props.value;
++        this.start = props.start;
++        this.end = props.end;
++    }
++
++    this.flags = 0;
++}, {
++    $documentation: "A lianmeng template literal",
++    $propdoc: {
++        value: "[string] the contents of this template literal",
++    }
++}, AST_Constant);
++
+ var AST_Number = DEFNODE("Number", "value raw", function AST_Number(props) {
+     if (props) {
+         this.value = props.value;
+@@ -3177,6 +3208,8 @@ export {
+     AST_While,
+     AST_With,
+     AST_Yield,
++    AST_LianmengLiteral,
++    AST_LianmengDirective,
+ 
+     // Walkers
+     TreeTransformer,
+diff --git a/lib/compress/common.js b/lib/compress/common.js
+index 8647ff36..5b1121d3 100644
+--- a/lib/compress/common.js
++++ b/lib/compress/common.js
+@@ -60,6 +60,7 @@ import {
+     AST_LabeledStatement,
+     AST_Lambda,
+     AST_Let,
++    AST_LianmengDirective,
+     AST_LoopControl,
+     AST_NaN,
+     AST_Node,
+@@ -280,7 +281,8 @@ export function can_be_evicted_from_block(node) {
+         node instanceof AST_Let ||
+         node instanceof AST_Const ||
+         node instanceof AST_Export ||
+-        node instanceof AST_Import
++        node instanceof AST_Import ||
++        node instanceof AST_LianmengDirective
+     );
+ }
+ 
+diff --git a/lib/compress/index.js b/lib/compress/index.js
+index 651b4406..d4f943c6 100644
+--- a/lib/compress/index.js
++++ b/lib/compress/index.js
+@@ -88,6 +88,7 @@ import {
+     AST_LabeledStatement,
+     AST_Lambda,
+     AST_Let,
++    AST_LianmengDirective,
+     AST_NaN,
+     AST_New,
+     AST_Node,
+@@ -622,6 +623,7 @@ function can_be_extracted_from_if_block(node) {
+         node instanceof AST_Const
+         || node instanceof AST_Let
+         || node instanceof AST_Class
++        || node instanceof AST_LianmengDirective
+     );
+ }
+ 
+diff --git a/lib/output.js b/lib/output.js
+index 94c8f0c5..7293f36f 100644
+--- a/lib/output.js
++++ b/lib/output.js
+@@ -148,6 +148,8 @@ import {
+     AST_While,
+     AST_With,
+     AST_Yield,
++    AST_LianmengDirective,
++    AST_LianmengLiteral,
+     TreeWalker,
+     walk,
+     walk_abort
+@@ -1167,6 +1169,10 @@ function OutputStream(options) {
+         output.semicolon();
+     });
+ 
++    DEFPRINT(AST_LianmengDirective, function(self, output) {
++        output.print("\n" + self.value + "\n");
++    });
++
+     DEFPRINT(AST_Expansion, function (self, output) {
+         output.print("...");
+         self.expression.print(output);
+@@ -1660,12 +1666,30 @@ function OutputStream(options) {
+     });
+     DEFPRINT(AST_Let, function(self, output) {
+         self._do_print(output, "let");
++        if (self.definitions.length === 1) {
++            var def = self.definitions[0];
++            if (def.value instanceof AST_LianmengLiteral) {
++                output.print("\n");
++            }
++        }
+     });
+     DEFPRINT(AST_Var, function(self, output) {
+         self._do_print(output, "var");
++        if (self.definitions.length === 1) {
++            var def = self.definitions[0];
++            if (def.value instanceof AST_LianmengLiteral) {
++                output.print("\n");
++            }
++        }
+     });
+     DEFPRINT(AST_Const, function(self, output) {
+         self._do_print(output, "const");
++        if (self.definitions.length === 1) {
++            var def = self.definitions[0];
++            if (def.value instanceof AST_LianmengLiteral) {
++                output.print("\n");
++            }
++        }
+     });
+     DEFPRINT(AST_Import, function(self, output) {
+         output.print("import");
+diff --git a/lib/parse.js b/lib/parse.js
+index b1c22fb4..845cf43f 100644
+--- a/lib/parse.js
++++ b/lib/parse.js
+@@ -156,6 +156,8 @@ import {
+     AST_While,
+     AST_With,
+     AST_Yield,
++    AST_LianmengLiteral,
++    AST_LianmengDirective,
+     _INLINE,
+     _NOINLINE,
+     _PURE
+@@ -715,6 +717,13 @@ function tokenizer($TEXT, filename, html5_comments, shebang) {
+         return tok;
+     });
+ 
++    var read_lianmeng_template = with_eof_error("Unterminated lianmeng template", function() {
++        var i = find("}}", true);
++        var text = S.text.substring(S.pos, i + 2);
++        forward(get_full_char_length(text));
++        return token("lianmeng_template", text);
++    });
++
+     function skip_line_comment(type) {
+         var regex_allowed = S.regex_allowed;
+         var i = find_eol(), ret;
+@@ -935,6 +944,17 @@ function tokenizer($TEXT, filename, html5_comments, shebang) {
+               }
+               case 96: return read_template_characters(true);
+               case 123:
++                // 连续两个 {{{
++                if (S.text.charCodeAt(S.pos + 1) === 123 && S.text.charCodeAt(S.pos + 2) === 123) {
++                    S.brace_counter++;
++                    break;
++                }
++                else if (S.text.charCodeAt(S.pos + 1) === 123) {
++                    // 连续两个 {{
++                    return read_lianmeng_template();
++                }
++                S.brace_counter++;
++                break;
+                 S.brace_counter++;
+                 break;
+               case 125:
+@@ -1211,6 +1231,10 @@ function parse($TEXT, options) {
+           case "atom":
+             return simple_statement();
+ 
++          case "lianmeng_template":
++            var stat = simple_statement();
++            return new AST_LianmengDirective(stat.body);
++
+           case "name":
+             if (S.token.value == "async" && is_token(peek(), "keyword", "function")) {
+                 next();
+@@ -2194,6 +2218,13 @@ function parse($TEXT, options) {
+                 quote : tok.quote
+             });
+             break;
++          case "lianmeng_template":
++            ret = new AST_LianmengLiteral({
++                start : tok,
++                end   : tok,
++                value : tok.value,
++            });
++            break;
+           case "regexp":
+             const [_, source, flags] = tok.value.match(/^\/(.*)\/(\w*)$/);
+ 
+@@ -2359,6 +2390,9 @@ function parse($TEXT, options) {
+         if (ATOMIC_START_TOKEN.has(S.token.type)) {
+             return subscripts(as_atom_node(), allow_calls);
+         }
++        if (S.token.type === "lianmeng_template") {
++            return subscripts(as_atom_node(), allow_calls);
++        }
+         unexpected();
+     };
+ 
